@@ -1,0 +1,11 @@
+[package]
+name = "toml"
+kind = "lib"
+unsafe = false
+
+[dependencies]
+array = { git = "https://github.com/bats-lang/array.git", version = "main" }
+arith = { git = "https://github.com/bats-lang/arith.git", version = "main" }
+str = { git = "https://github.com/bats-lang/str.git", version = "main" }
+result = { git = "https://github.com/bats-lang/result.git", version = "main" }
+dict = { git = "https://github.com/bats-lang/dict.git", version = "main" }
