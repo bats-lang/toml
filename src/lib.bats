@@ -55,6 +55,12 @@
    key: !$A.borrow(byte, lk, nk), klen: int nk,
    buf: !$A.arr(byte, lo, mo), max: int mo): $R.option(int)
 
+#pub fun keys
+  {lb:agz}{nb:pos}{lo:agz}{mo:pos}
+  (doc: !toml_doc,
+   section: !$A.borrow(byte, lb, nb), slen: int nb,
+   buf: !$A.arr(byte, lo, mo), max: int mo): $R.option(int)
+
 #pub fun toml_free
   (doc: toml_doc): void
 
@@ -383,6 +389,99 @@ in
       prval () = fold@(doc)
     in $R.some(vlen) end
   | ~$R.none() => $R.none()
+end
+
+(* ============================================================
+   keys implementation: list all key names in a section
+   ============================================================ *)
+
+implement keys {lb}{nb}{lo}{mo}
+  (doc, section, slen, buf, max) = let
+  val+ @toml_doc_mk(doc_buf, doc_len, entries, nentries) = doc
+
+  fun cmp_sec
+    {la:agz}{lb2:agz}{nb2:pos}{fuel:nat} .<fuel>.
+    (arr: !$A.arr(byte, la, TOML_MAX_BUF),
+     off: int, len: int,
+     borrow: !$A.borrow(byte, lb2, nb2), blen: int nb2,
+     i: int, fuel: int fuel): bool =
+    if fuel <= 0 then true
+    else if i >= len then true
+    else let
+      val ai = g1ofg0(off + i)
+      val bi = g1ofg0(i)
+    in
+      if ai >= 0 then if ai < 65536 then
+        if bi >= 0 then if bi < blen then let
+          val ca = byte2int0($A.get<byte>(arr, ai))
+          val cb = byte2int0($A.read<byte>(borrow, bi))
+        in if $AR.neq_int_int(ca, cb) then false
+          else cmp_sec(arr, off, len, borrow, blen, i + 1, fuel - 1) end
+        else false else false
+      else false else false
+    end
+
+  fun collect
+    {la:agz}{le:agz}{lb2:agz}{nb2:pos}{lo2:agz}{mo2:pos}{fuel:nat} .<fuel>.
+    (doc_buf: !$A.arr(byte, la, TOML_MAX_BUF),
+     entries: !$A.arr(int, le, TOML_ENTRY_INTS),
+     section: !$A.borrow(byte, lb2, nb2), slen: int nb2,
+     buf: !$A.arr(byte, lo2, mo2), max: int mo2,
+     nentries: int, idx: int, opos: int, fuel: int fuel): int =
+    if fuel <= 0 then opos
+    else if idx >= nentries then opos
+    else let
+      val base = idx * 6
+      val last = base + 5
+      val bg = g1ofg0(base) val lg = g1ofg0(last)
+    in
+      if bg >= 0 then if lg >= 0 then if lg < 1536 then let
+        val e_sec_off = $A.get<int>(entries, $AR.checked_idx(base, 1536))
+        val e_sec_len = $A.get<int>(entries, $AR.checked_idx(base + 1, 1536))
+        val e_key_off = $A.get<int>(entries, $AR.checked_idx(base + 2, 1536))
+        val e_key_len = $A.get<int>(entries, $AR.checked_idx(base + 3, 1536))
+        val sec_match =
+          if $AR.neq_int_int(e_sec_len, slen) then false
+          else if $AR.eq_int_int(e_sec_len, 0) then true
+          else cmp_sec(doc_buf, e_sec_off, e_sec_len, section, slen, 0,
+            $AR.checked_nat(e_sec_len + 1))
+      in
+        if sec_match then let
+          (* Copy key name to output buffer, null-terminate *)
+          fun copy_key {fuel2:nat} .<fuel2>.
+            (arr: !$A.arr(byte, la, TOML_MAX_BUF),
+             off: int, len: int,
+             out: !$A.arr(byte, lo2, mo2), opos: int, max2: int mo2,
+             fuel2: int fuel2): int =
+            if fuel2 <= 0 then opos
+            else if opos >= max2 then opos
+            else let val si = g1ofg0(off) val di = g1ofg0(opos) in
+              if si >= 0 then if si < 65536 then
+                if di >= 0 then if di < max2 then
+                  if len <= 0 then let
+                    val () = $A.set<byte>(out, di, $A.int2byte(0))
+                  in opos + 1 end
+                  else let
+                    val b = byte2int0($A.get<byte>(arr, si))
+                    val () = $A.set<byte>(out, di, $A.int2byte($AR.checked_byte(b)))
+                  in copy_key(arr, off + 1, len - 1, out, opos + 1, max2, fuel2 - 1) end
+                else opos else opos
+              else opos else opos
+            end
+          val new_opos = copy_key(doc_buf, e_key_off, e_key_len, buf, opos, max,
+            $AR.checked_nat(e_key_len + 2))
+        in collect(doc_buf, entries, section, slen, buf, max, nentries, idx + 1, new_opos, fuel - 1) end
+        else collect(doc_buf, entries, section, slen, buf, max, nentries, idx + 1, opos, fuel - 1)
+      end
+      else collect(doc_buf, entries, section, slen, buf, max, nentries, idx + 1, opos, fuel - 1)
+      else collect(doc_buf, entries, section, slen, buf, max, nentries, idx + 1, opos, fuel - 1)
+      else collect(doc_buf, entries, section, slen, buf, max, nentries, idx + 1, opos, fuel - 1)
+    end
+
+  val result = collect(doc_buf, entries, section, slen, buf, max, nentries, 0, 0, $AR.checked_nat(nentries + 1))
+  prval () = fold@(doc)
+in
+  if result > 0 then $R.some(result) else $R.none()
 end
 
 (* ============================================================
