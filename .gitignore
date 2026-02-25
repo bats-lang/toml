@@ -1,9 +1,4 @@
-*.sats
-*.dats
-*_dats.c
-*.o
-debug/
-release/
-_bats_*
+build/
+docs/
 bats_modules/
 bats.lock
