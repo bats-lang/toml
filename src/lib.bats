@@ -65,6 +65,57 @@
   (doc: toml_doc): void
 
 (* ============================================================
+   Safe read/write helpers using g1ofg0 + bounds branching
+   ============================================================ *)
+
+fn _to_nat(x: int): [n:nat] int(n) = let
+  val v = g1ofg0(x)
+in
+  if v >= 0 then v else 0
+end
+
+fn _to_byte(x: int): [v:nat | v < 256] int(v) = let
+  val v = g1ofg0(x)
+in
+  if v >= 0 then if v < 256 then v else 0 else 0
+end
+
+fn _rd_bw {l:agz}
+  (buf: !$A.borrow(byte, l, TOML_MAX_BUF), pos: int): int = let
+  val i = g1ofg0(pos)
+in
+  if i >= 0 then if i < 65536 then byte2int0($A.read<byte>(buf, i)) else 0 else 0
+end
+
+fn _rd_arr {l:agz}
+  (arr: !$A.arr(byte, l, TOML_MAX_BUF), pos: int): int = let
+  val i = g1ofg0(pos)
+in
+  if i >= 0 then if i < 65536 then byte2int0($A.get<byte>(arr, i)) else 0 else 0
+end
+
+fn _wr_arr {l:agz}
+  (arr: !$A.arr(byte, l, TOML_MAX_BUF), pos: int, b: byte): void = let
+  val i = g1ofg0(pos)
+in
+  if i >= 0 then if i < 65536 then $A.set<byte>(arr, i, b) else () else ()
+end
+
+fn _rd_int {l:agz}{n:pos}
+  (arr: !$A.arr(int, l, n), pos: int, sz: int n): int = let
+  val i = g1ofg0(pos)
+in
+  if i >= 0 then if $AR.lt_g1(i, sz) then $A.get<int>(arr, i) else 0 else 0
+end
+
+fn _wr_int {l:agz}{n:pos}
+  (arr: !$A.arr(int, l, n), pos: int, v: int, sz: int n): void = let
+  val i = g1ofg0(pos)
+in
+  if i >= 0 then if $AR.lt_g1(i, sz) then $A.set<int>(arr, i, v) else () else ()
+end
+
+(* ============================================================
    Internal helpers
    ============================================================ *)
 
@@ -80,7 +131,7 @@ fun _skip_ws
    pos: int, fuel: int fuel): int =
   if fuel <= 0 then pos
   else let
-    val c = byte2int0($A.read<byte>(buf, $AR.checked_idx(pos, 65536)))
+    val c = _rd_bw(buf, pos)
   in if _is_ws(c) then _skip_ws(buf, pos + 1, fuel - 1) else pos end
 
 fun _find_char
@@ -89,7 +140,7 @@ fun _find_char
    pos: int, target: int, fuel: int fuel): int =
   if fuel <= 0 then pos
   else let
-    val c = byte2int0($A.read<byte>(buf, $AR.checked_idx(pos, 65536)))
+    val c = _rd_bw(buf, pos)
   in
     if $AR.eq_int_int(c, target) then pos
     else if $AR.eq_int_int(c, NEWLINE) then pos
@@ -103,7 +154,7 @@ fun _find_eol
   if fuel <= 0 then pos
   else if $AR.gte_int_int(pos, input_len) then input_len
   else let
-    val c = byte2int0($A.read<byte>(buf, $AR.checked_idx(pos, 65536)))
+    val c = _rd_bw(buf, pos)
   in if $AR.eq_int_int(c, NEWLINE) then pos else _find_eol(buf, pos + 1, input_len, fuel - 1) end
 
 fun _trim_right_pos
@@ -113,10 +164,10 @@ fun _trim_right_pos
   if fuel <= 0 then endp
   else if $AR.lte_int_int(endp, start) then start
   else let
-    val c = byte2int0($A.read<byte>(buf, $AR.checked_idx(endp - 1, 65536)))
+    val c = _rd_bw(buf, endp - 1)
   in if _is_ws(c) then _trim_right_pos(buf, start, endp - 1, fuel - 1) else endp end
 
-(* Store a single entry. Uses checked_idx for bounds proofs. *)
+(* Store a single entry. *)
 fn _store_entry
   {le:agz}
   (entries: !$A.arr(int, le, TOML_ENTRY_INTS),
@@ -129,12 +180,12 @@ fn _store_entry
 in
   if last >= 0 then
     if last < 1536 then let
-      val () = $A.set<int>(entries, $AR.checked_idx(base, 1536), sec_off)
-      val () = $A.set<int>(entries, $AR.checked_idx(base + 1, 1536), sec_len)
-      val () = $A.set<int>(entries, $AR.checked_idx(base + 2, 1536), key_off)
-      val () = $A.set<int>(entries, $AR.checked_idx(base + 3, 1536), key_len)
-      val () = $A.set<int>(entries, $AR.checked_idx(base + 4, 1536), val_off)
-      val () = $A.set<int>(entries, $AR.checked_idx(last, 1536), val_len)
+      val () = _wr_int(entries, base, sec_off, 1536)
+      val () = _wr_int(entries, base + 1, sec_len, 1536)
+      val () = _wr_int(entries, base + 2, key_off, 1536)
+      val () = _wr_int(entries, base + 3, key_len, 1536)
+      val () = _wr_int(entries, base + 4, val_off, 1536)
+      val () = _wr_int(entries, last, val_len, 1536)
     in nentries + 1 end
     else nentries
   else nentries
@@ -157,12 +208,18 @@ implement parse {lb}{n} (input, len) = let
     if fuel <= 0 then ()
     else if $AR.gte_int_int(i, actual) then ()
     else let
-      val idx = $AR.checked_idx(i, src_len)
-      val b = $A.read<byte>(src, idx)
-      val () = $A.set<byte>(dst, $AR.checked_idx(i, 65536), b)
-    in copy_input(dst, src, i + 1, actual, src_len, fuel - 1) end
+      val ig = g1ofg0(i)
+    in
+      if ig >= 0 then
+        if $AR.lt_g1(ig, src_len) then let
+          val b = $A.read<byte>(src, ig)
+          val () = _wr_arr(dst, i, b)
+        in copy_input(dst, src, i + 1, actual, src_len, fuel - 1) end
+        else ()
+      else ()
+    end
 
-  val () = copy_input(doc_buf, input, 0, actual_len, len, $AR.checked_nat(actual_len))
+  val () = copy_input(doc_buf, input, 0, actual_len, len, len)
 
   val @(fz_buf, bw_buf) = $A.freeze<byte>(doc_buf)
 
@@ -182,7 +239,7 @@ implement parse {lb}{n} (input, len) = let
     in
       if $AR.gte_int_int(p, input_len) then nentries
       else let
-        val c = byte2int0($A.read<byte>(bw, $AR.checked_idx(p, 65536)))
+        val c = _rd_bw(bw, p)
       in
         if $AR.eq_int_int(c, NEWLINE) then
           parse_loop(bw, entries, p + 1, nentries, sec_off, sec_len, input_len, fuel - 1)
@@ -211,7 +268,7 @@ implement parse {lb}{n} (input, len) = let
             if $AR.gte_int_int(val_start0, input_len) then
               parse_loop(bw, entries, eol + 1, nentries, sec_off, sec_len, input_len, fuel - 1)
             else let
-              val vc = byte2int0($A.read<byte>(bw, $AR.checked_idx(val_start0, 65536)))
+              val vc = _rd_bw(bw, val_start0)
             in
               if $AR.eq_int_int(vc, QUOTE) then let
                 val str_start = val_start0 + 1
@@ -254,11 +311,18 @@ implement get {lb}{nb}{lk}{nk}{lo}{mo}
     if fuel <= 0 then true
     else if $AR.gte_int_int(i, count) then true
     else let
-      val ca = byte2int0($A.get<byte>(arr, $AR.checked_idx(arr_off + i, 65536)))
-      val cb = byte2int0($A.read<byte>(borrow, $AR.checked_idx(i, blen)))
+      val ca = _rd_arr(arr, arr_off + i)
+      val ig = g1ofg0(i)
     in
-      if $AR.neq_int_int(ca, cb) then false
-      else cmp_arr_borrow(arr, arr_off, borrow, blen, count, i + 1, fuel - 1)
+      if ig >= 0 then
+        if $AR.lt_g1(ig, blen) then let
+          val cb = byte2int0($A.read<byte>(borrow, ig))
+        in
+          if $AR.neq_int_int(ca, cb) then false
+          else cmp_arr_borrow(arr, arr_off, borrow, blen, count, i + 1, fuel - 1)
+        end
+        else false
+      else false
     end
 
   fun search
@@ -277,12 +341,12 @@ implement get {lb}{nb}{lk}{nk}{lo}{mo}
       if last < 0 then $R.none()
       else if last >= 1536 then $R.none()
       else let
-        val e_sec_off = $A.get<int>(entries, $AR.checked_idx(base, 1536))
-        val e_sec_len = $A.get<int>(entries, $AR.checked_idx(base + 1, 1536))
-        val e_key_off = $A.get<int>(entries, $AR.checked_idx(base + 2, 1536))
-        val e_key_len = $A.get<int>(entries, $AR.checked_idx(base + 3, 1536))
-        val e_val_off = $A.get<int>(entries, $AR.checked_idx(base + 4, 1536))
-        val e_val_len = $A.get<int>(entries, $AR.checked_idx(last, 1536))
+        val e_sec_off = _rd_int(entries, base, 1536)
+        val e_sec_len = _rd_int(entries, base + 1, 1536)
+        val e_key_off = _rd_int(entries, base + 2, 1536)
+        val e_key_len = _rd_int(entries, base + 3, 1536)
+        val e_val_off = _rd_int(entries, base + 4, 1536)
+        val e_val_len = _rd_int(entries, last, 1536)
 
         val sec_match =
           if $AR.neq_int_int(e_sec_len, slen) then false
@@ -300,7 +364,7 @@ implement get {lb}{nb}{lk}{nk}{lo}{mo}
       end
     end
 
-  val found = search(doc_buf, entries, section, slen, key, klen, nentries, 0, $AR.checked_nat(nentries))
+  val found = search(doc_buf, entries, section, slen, key, klen, nentries, 0, _to_nat(nentries))
 
   prval () = fold@(doc)
 in
@@ -317,10 +381,18 @@ in
         if fuel <= 0 then ()
         else if $AR.gte_int_int(i, count) then ()
         else let
-          val b = $A.get<byte>(src, $AR.checked_idx(src_off + i, 65536))
-          val () = $A.set<byte>(dst, $AR.checked_idx(i, max_d), b)
-        in copy_val(dst, max_d, src, src_off, count, i + 1, fuel - 1) end
-      val () = copy_val(buf, max, doc_buf2, voff, vlen, 0, $AR.checked_nat(vlen))
+          val b_src = _rd_arr(src, src_off + i)
+          val ig = g1ofg0(i)
+        in
+          if ig >= 0 then
+            if $AR.lt_g1(ig, max_d) then let
+              val () = $A.set<byte>(dst, ig, $A.int2byte(_to_byte(b_src)))
+            in copy_val(dst, max_d, src, src_off, count, i + 1, fuel - 1) end
+            else ()
+          else ()
+        end
+      val vl = _to_nat(vlen)
+      val () = copy_val(buf, max, doc_buf2, voff, vlen, 0, vl)
       prval () = fold@(doc)
     in $R.some(vlen) end
   | ~$R.none() => $R.none()
@@ -343,11 +415,18 @@ implement keys {lb}{nb}{lo}{mo}
     if fuel <= 0 then true
     else if i >= len then true
     else let
-      val ca = byte2int0($A.get<byte>(arr, $AR.checked_idx(off + i, 65536)))
-      val cb = byte2int0($A.read<byte>(borrow, $AR.checked_idx(i, blen)))
+      val ca = _rd_arr(arr, off + i)
+      val ig = g1ofg0(i)
     in
-      if $AR.neq_int_int(ca, cb) then false
-      else cmp_sec(arr, off, len, borrow, blen, i + 1, fuel - 1)
+      if ig >= 0 then
+        if $AR.lt_g1(ig, blen) then let
+          val cb = byte2int0($A.read<byte>(borrow, ig))
+        in
+          if $AR.neq_int_int(ca, cb) then false
+          else cmp_sec(arr, off, len, borrow, blen, i + 1, fuel - 1)
+        end
+        else false
+      else false
     end
 
   fun collect
@@ -366,45 +445,47 @@ implement keys {lb}{nb}{lo}{mo}
       if last < 0 then collect(doc_buf, entries, section, slen, buf, max, nentries, idx + 1, opos, fuel - 1)
       else if last >= 1536 then collect(doc_buf, entries, section, slen, buf, max, nentries, idx + 1, opos, fuel - 1)
       else let
-        val e_sec_off = $A.get<int>(entries, $AR.checked_idx(base, 1536))
-        val e_sec_len = $A.get<int>(entries, $AR.checked_idx(base + 1, 1536))
-        val e_key_off = $A.get<int>(entries, $AR.checked_idx(base + 2, 1536))
-        val e_key_len = $A.get<int>(entries, $AR.checked_idx(base + 3, 1536))
+        val e_sec_off = _rd_int(entries, base, 1536)
+        val e_sec_len = _rd_int(entries, base + 1, 1536)
+        val e_key_off = _rd_int(entries, base + 2, 1536)
+        val e_key_len = _rd_int(entries, base + 3, 1536)
+        val fuel2 = _to_nat(e_sec_len + 1)
         val sec_match =
           if $AR.neq_int_int(e_sec_len, slen) then false
           else if $AR.eq_int_int(e_sec_len, 0) then true
-          else cmp_sec(doc_buf, e_sec_off, e_sec_len, section, slen, 0,
-            $AR.checked_nat(e_sec_len + 1))
+          else cmp_sec(doc_buf, e_sec_off, e_sec_len, section, slen, 0, fuel2)
       in
         if sec_match then let
-          (* Copy key name to output buffer, null-terminate *)
           fun copy_key {fuel2:nat} .<fuel2>.
             (arr: !$A.arr(byte, la, TOML_MAX_BUF),
              off: int, len: int,
              out: !$A.arr(byte, lo2, mo2), opos: int, max2: int mo2,
              fuel2: int fuel2): int =
             if fuel2 <= 0 then opos
-            else if opos >= max2 then opos
             else let
-              val si = $AR.checked_idx(off, 65536)
-              val di = $AR.checked_idx(opos, max2)
+              val opg = g1ofg0(opos)
             in
-              if len <= 0 then let
-                val () = $A.set<byte>(out, di, $A.int2byte(0))
-              in opos + 1 end
-              else let
-                val b = byte2int0($A.get<byte>(arr, si))
-                val () = $A.set<byte>(out, di, $A.int2byte($AR.checked_byte(b)))
-              in copy_key(arr, off + 1, len - 1, out, opos + 1, max2, fuel2 - 1) end
+              if opg >= 0 then
+                if $AR.lt_g1(opg, max2) then
+                  if len <= 0 then let
+                    val () = $A.set<byte>(out, opg, $A.int2byte(0))
+                  in opos + 1 end
+                  else let
+                    val b = _rd_arr(arr, off)
+                    val () = $A.set<byte>(out, opg, $A.int2byte(_to_byte(b)))
+                  in copy_key(arr, off + 1, len - 1, out, opos + 1, max2, fuel2 - 1) end
+                else opos
+              else opos
             end
-          val new_opos = copy_key(doc_buf, e_key_off, e_key_len, buf, opos, max,
-            $AR.checked_nat(e_key_len + 2))
+          val fuel3 = _to_nat(e_key_len + 2)
+          val new_opos = copy_key(doc_buf, e_key_off, e_key_len, buf, opos, max, fuel3)
         in collect(doc_buf, entries, section, slen, buf, max, nentries, idx + 1, new_opos, fuel - 1) end
         else collect(doc_buf, entries, section, slen, buf, max, nentries, idx + 1, opos, fuel - 1)
       end
     end
 
-  val result = collect(doc_buf, entries, section, slen, buf, max, nentries, 0, 0, $AR.checked_nat(nentries + 1))
+  val fuel = _to_nat(nentries + 1)
+  val result = collect(doc_buf, entries, section, slen, buf, max, nentries, 0, 0, fuel)
   prval () = fold@(doc)
 in
   if result > 0 then $R.some(result) else $R.none()
@@ -425,28 +506,35 @@ end
    Static tests
    ============================================================ *)
 
+fn _safe_byte(x: int): byte = let
+  val v = g1ofg0(x)
+in
+  if v >= 0 then if v < 256 then $A.int2byte(v) else $A.int2byte(0) else $A.int2byte(0)
+end
+
 fn _test_parse_free(): void = let
+  (* "[pkg]\nname = \"hello\"" *)
   val input = $A.alloc<byte>(20)
-  val () = $A.set<byte>(input, 0, $A.int2byte($AR.checked_byte(91)))
-  val () = $A.set<byte>(input, 1, $A.int2byte($AR.checked_byte(112)))
-  val () = $A.set<byte>(input, 2, $A.int2byte($AR.checked_byte(107)))
-  val () = $A.set<byte>(input, 3, $A.int2byte($AR.checked_byte(103)))
-  val () = $A.set<byte>(input, 4, $A.int2byte($AR.checked_byte(93)))
-  val () = $A.set<byte>(input, 5, $A.int2byte($AR.checked_byte(10)))
-  val () = $A.set<byte>(input, 6, $A.int2byte($AR.checked_byte(110)))
-  val () = $A.set<byte>(input, 7, $A.int2byte($AR.checked_byte(97)))
-  val () = $A.set<byte>(input, 8, $A.int2byte($AR.checked_byte(109)))
-  val () = $A.set<byte>(input, 9, $A.int2byte($AR.checked_byte(101)))
-  val () = $A.set<byte>(input, 10, $A.int2byte($AR.checked_byte(32)))
-  val () = $A.set<byte>(input, 11, $A.int2byte($AR.checked_byte(61)))
-  val () = $A.set<byte>(input, 12, $A.int2byte($AR.checked_byte(32)))
-  val () = $A.set<byte>(input, 13, $A.int2byte($AR.checked_byte(34)))
-  val () = $A.set<byte>(input, 14, $A.int2byte($AR.checked_byte(104)))
-  val () = $A.set<byte>(input, 15, $A.int2byte($AR.checked_byte(101)))
-  val () = $A.set<byte>(input, 16, $A.int2byte($AR.checked_byte(108)))
-  val () = $A.set<byte>(input, 17, $A.int2byte($AR.checked_byte(108)))
-  val () = $A.set<byte>(input, 18, $A.int2byte($AR.checked_byte(111)))
-  val () = $A.set<byte>(input, 19, $A.int2byte($AR.checked_byte(34)))
+  val () = $A.set<byte>(input, 0, _safe_byte(91))
+  val () = $A.set<byte>(input, 1, _safe_byte(112))
+  val () = $A.set<byte>(input, 2, _safe_byte(107))
+  val () = $A.set<byte>(input, 3, _safe_byte(103))
+  val () = $A.set<byte>(input, 4, _safe_byte(93))
+  val () = $A.set<byte>(input, 5, _safe_byte(10))
+  val () = $A.set<byte>(input, 6, _safe_byte(110))
+  val () = $A.set<byte>(input, 7, _safe_byte(97))
+  val () = $A.set<byte>(input, 8, _safe_byte(109))
+  val () = $A.set<byte>(input, 9, _safe_byte(101))
+  val () = $A.set<byte>(input, 10, _safe_byte(32))
+  val () = $A.set<byte>(input, 11, _safe_byte(61))
+  val () = $A.set<byte>(input, 12, _safe_byte(32))
+  val () = $A.set<byte>(input, 13, _safe_byte(34))
+  val () = $A.set<byte>(input, 14, _safe_byte(104))
+  val () = $A.set<byte>(input, 15, _safe_byte(101))
+  val () = $A.set<byte>(input, 16, _safe_byte(108))
+  val () = $A.set<byte>(input, 17, _safe_byte(108))
+  val () = $A.set<byte>(input, 18, _safe_byte(111))
+  val () = $A.set<byte>(input, 19, _safe_byte(34))
   val @(fz, bw) = $A.freeze<byte>(input)
   val r = parse(bw, 20)
   val () = $A.drop<byte>(fz, bw)
@@ -459,16 +547,17 @@ in
 end
 
 fn _test_parse_bare(): void = let
+  (* "k = true\n" *)
   val input = $A.alloc<byte>(9)
-  val () = $A.set<byte>(input, 0, $A.int2byte($AR.checked_byte(107)))
-  val () = $A.set<byte>(input, 1, $A.int2byte($AR.checked_byte(32)))
-  val () = $A.set<byte>(input, 2, $A.int2byte($AR.checked_byte(61)))
-  val () = $A.set<byte>(input, 3, $A.int2byte($AR.checked_byte(32)))
-  val () = $A.set<byte>(input, 4, $A.int2byte($AR.checked_byte(116)))
-  val () = $A.set<byte>(input, 5, $A.int2byte($AR.checked_byte(114)))
-  val () = $A.set<byte>(input, 6, $A.int2byte($AR.checked_byte(117)))
-  val () = $A.set<byte>(input, 7, $A.int2byte($AR.checked_byte(101)))
-  val () = $A.set<byte>(input, 8, $A.int2byte($AR.checked_byte(10)))
+  val () = $A.set<byte>(input, 0, _safe_byte(107))
+  val () = $A.set<byte>(input, 1, _safe_byte(32))
+  val () = $A.set<byte>(input, 2, _safe_byte(61))
+  val () = $A.set<byte>(input, 3, _safe_byte(32))
+  val () = $A.set<byte>(input, 4, _safe_byte(116))
+  val () = $A.set<byte>(input, 5, _safe_byte(114))
+  val () = $A.set<byte>(input, 6, _safe_byte(117))
+  val () = $A.set<byte>(input, 7, _safe_byte(101))
+  val () = $A.set<byte>(input, 8, _safe_byte(10))
   val @(fz, bw) = $A.freeze<byte>(input)
   val r = parse(bw, 9)
   val () = $A.drop<byte>(fz, bw)
