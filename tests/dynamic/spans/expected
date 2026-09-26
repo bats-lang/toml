@@ -1,0 +1,9 @@
+section 6 19
+section 64 71
+section -1 -1
+value 27 32 string [lit]
+value 42 46 bare [true]
+value 58 63 string [bin]
+value -1 -1 bare []
+root keys yes
+bytes 91 -1 -1
