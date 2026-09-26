@@ -9,6 +9,6 @@ get none
 get none
 get none
 keys 25 [name|kind|unsafe|version|]
-keys 12 ["arith"|str|]
+keys 10 [arith|str|]
 keys 2 [x|]
 keys 6 [name|k]

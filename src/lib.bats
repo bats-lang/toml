@@ -155,6 +155,15 @@ fn _store_entry
   val () = _put16(e, b + 10, val_len)
 in k + 1 end
 
+(* Whether buf[s, e) is a quoted key "k". TOML names such a key by the
+   text between the quotes, so it is stored without them. *)
+fn _is_quoted
+  {lb:agz}{s,e:nat | s <= e; e <= TOML_MAX_BUF}
+  (buf: !$A.borrow(byte, lb, TOML_MAX_BUF), s: int s, e: int e): bool =
+  if e - s < 2 then false
+  else if _rd(buf, s) != QUOTE then false
+  else _rd(buf, e - 1) = QUOTE
+
 (* doc[off + j] = b[j] for every j < nb. *)
 fn _region_eq
   {la:agz}{lb:agz}{nb:pos}{o:nat | o + nb <= TOML_MAX_BUF}
@@ -236,6 +245,7 @@ implement parse {lb}{n} (input, len) = let
             parse_loop(bw, entries, eq_pos + 1, k, sec_off, sec_len, m)
           else let
             val key_end = _trim_right(bw, p, eq_pos)
+            val q = (if _is_quoted(bw, p, key_end) then 1 else 0): int
             val v0 = _skip_ws(bw, eq_pos + 1, m)
             val eol = _find_eol(bw, v0, m)
           in
@@ -244,11 +254,11 @@ implement parse {lb}{n} (input, len) = let
             else if _rd(bw, v0) = QUOTE then let
               val s0 = v0 + 1
               val s1 = _find_char(bw, s0, QUOTE, m)
-              val k2 = _store_entry(entries, k, sec_off, sec_len, p, key_end - p, s0, s1 - s0)
+              val k2 = _store_entry(entries, k, sec_off, sec_len, p + q, key_end - p - 2 * q, s0, s1 - s0)
             in parse_loop(bw, entries, eol + 1, k2, sec_off, sec_len, m) end
             else let
               val v1 = _trim_right(bw, v0, eol)
-              val k2 = _store_entry(entries, k, sec_off, sec_len, p, key_end - p, v0, v1 - v0)
+              val k2 = _store_entry(entries, k, sec_off, sec_len, p + q, key_end - p - 2 * q, v0, v1 - v0)
             in parse_loop(bw, entries, eol + 1, k2, sec_off, sec_len, m) end
           end
         end
