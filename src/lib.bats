@@ -91,6 +91,15 @@
 (* The byte at i of the parsed text; ~1 outside it. *)
 #pub fun byte_at {i:int} (doc: !toml_doc, i: int i): int
 
+(* The first syntax error in the parsed text, as the toml crate reports
+   it: its offset, and its message in msg[0, k); offset ~1 when there is
+   none. Covers table headers, keys, basic strings, bare values, what
+   follows a value, and duplicate headers and keys; arrays, inline
+   tables, multi-line strings and dotted keys are passed over as valid. *)
+#pub fun syntax_error
+  {lo:agz}{mo:pos}
+  (doc: !toml_doc, msg: !$A.arr(byte, lo, mo), max: int mo): @([o:int] int o, [k:nat | k <= mo] int k)
+
 (* ============================================================
    Scanning. Positions are indexed and never pass the input length m,
    so every read is proven in bounds.
@@ -465,6 +474,344 @@ implement byte_at {i} (doc, i) = let
            else byte2int0($A.get<byte>(doc_buf, i))): int
   prval () = fold@(doc)
 in r end
+
+(* ============================================================
+   Syntax errors, as the toml crate reports them
+   ============================================================ *)
+
+typedef _ip = [p:int] int p
+
+(* The byte at p of d[0, m), or ~1 *)
+fn _at {la:agz}{m:nat | m <= TOML_MAX_BUF}
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, m: int m): int =
+  if p < 0 then ~1 else if p >= m then ~1 else byte2int0($A.get<byte>(d, p))
+
+fn _bare (c: int): bool =
+  if c >= 97 then c <= 122
+  else if c >= 65 then (if c <= 90 then true else c = 95)
+  else if c >= 48 then c <= 57
+  else c = 45
+
+(* Past spaces and tabs from p *)
+fun _sp {la:agz}{m:nat | m <= TOML_MAX_BUF}{f:nat} .<f>.
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, m: int m, f: int f): _ip =
+  if f <= 0 then p
+  else let val c = _at(d, p, m) in
+    if c = SPACE then _sp(d, p + 1, m, f - 1)
+    else if c = TAB then _sp(d, p + 1, m, f - 1)
+    else p
+  end
+
+(* Past a bare key's characters from p *)
+fun _bare_end {la:agz}{m:nat | m <= TOML_MAX_BUF}{f:nat} .<f>.
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, m: int m, f: int f): _ip =
+  if f <= 0 then p else if _bare(_at(d, p, m)) then _bare_end(d, p + 1, m, f - 1) else p
+
+(* Past a bare value (up to a space, a comment or the end of the line) *)
+fun _word_end {la:agz}{m:nat | m <= TOML_MAX_BUF}{f:nat} .<f>.
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, m: int m, f: int f): _ip =
+  if f <= 0 then p
+  else let val c = _at(d, p, m) in
+    if c < 0 then p else if c = NEWLINE then p else if c = SPACE then p
+    else if c = TAB then p else if c = HASH then p else if c = CR then p
+    else if c = 44 then p else _word_end(d, p + 1, m, f - 1)
+  end
+
+(* The first q at or after p holding c, a newline or the end *)
+fun _to {la:agz}{m:nat | m <= TOML_MAX_BUF}{f:nat} .<f>.
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, c: int, m: int m, f: int f): _ip =
+  if f <= 0 then p
+  else let val b = _at(d, p, m) in
+    if b < 0 then p else if b = c then p else if b = NEWLINE then p
+    else _to(d, p + 1, c, m, f - 1)
+  end
+
+(* The end of the line at p (its newline, or where the text ends) *)
+fun _eol {la:agz}{m:nat | m <= TOML_MAX_BUF}{f:nat} .<f>.
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, m: int m, f: int f): _ip =
+  if f <= 0 then p
+  else let val b = _at(d, p, m) in
+    if b < 0 then p else if b = NEWLINE then p else _eol(d, p + 1, m, f - 1)
+  end
+
+(* One part of a key (bare or quoted) from p: its end, or ~1 *)
+fn _key_part {la:agz}{m:nat | m <= TOML_MAX_BUF}
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, m: int m): _ip = let
+  val c = _at(d, p, m)
+in
+  if c = QUOTE then let val q = _to(d, p + 1, QUOTE, m, 65536) in
+    if _at(d, q, m) = QUOTE then q + 1 else ~1 end
+  else if c = APOS then let val q = _to(d, p + 1, APOS, m, 65536) in
+    if _at(d, q, m) = APOS then q + 1 else ~1 end
+  else if _bare(c) then _bare_end(d, p, m, 65536)
+  else ~1
+end
+
+(* A key from p, dotted parts too: its end, or ~1 when there is none *)
+fun _key {la:agz}{m:nat | m <= TOML_MAX_BUF}{f:nat} .<f>.
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, m: int m, f: int f): _ip =
+  if f <= 0 then ~1
+  else let val e = _key_part(d, p, m) in
+    if e < 0 then ~1
+    else let val n = _sp(d, e, m, 65536) in
+      if _at(d, n, m) = 46 then _key(d, _sp(d, n + 1, m, 65536), m, f - 1) else e
+    end
+  end
+
+(* Whether d[a, a + k) = d[b, b + k) *)
+fun _same {la:agz}{m:nat | m <= TOML_MAX_BUF}{f:nat} .<f>.
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), a: _ip, b: _ip, k: int, m: int m, f: int f): bool =
+  if f <= 0 then false
+  else if k <= 0 then true
+  else if _at(d, a, m) != _at(d, b, m) then false
+  else _same(d, a + 1, b + 1, k - 1, m, f - 1)
+
+(* Whether d[p, p + k) spells the k characters of lit from j *)
+fun _lit_from {la:agz}{m:nat | m <= TOML_MAX_BUF}{k:pos}{j:nat | j <= k} .<k - j>.
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, lit: &(@[char][k]), j: int j, k: int k, m: int m): bool =
+  if j >= k then true
+  else if _at(d, p + j, m) != char2int0(lit[j]) then false
+  else _lit_from(d, p, lit, j + 1, k, m)
+
+(* Whether a line of d[p, upto) is a header naming d[ns, ne) *)
+fun _header_seen {la:agz}{m:nat | m <= TOML_MAX_BUF}{f:nat} .<f>.
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, upto: _ip, ns: _ip, ne: _ip, m: int m, f: int f): bool =
+  if f <= 0 then false
+  else if p >= upto then false
+  else let
+    val s = _sp(d, p, m, 65536)
+    val k0 = _sp(d, s + 1, m, 65536)
+    val k1 = (if _at(d, s, m) != LBRACKET then ~1
+              else if _at(d, s + 1, m) = LBRACKET then ~1
+              else _key(d, k0, m, 64)): _ip
+    val hit = (if k1 < 0 then false else if k1 - k0 != ne - ns then false
+               else _same(d, k0, ns, ne - ns, m, 65536)): bool
+  in if hit then true else _header_seen(d, _eol(d, p, m, 65536) + 1, upto, ns, ne, m, f - 1) end
+
+(* Whether a line of d[p, upto) sets the key d[ks, ke), stopping at the
+   next header *)
+fun _key_seen {la:agz}{m:nat | m <= TOML_MAX_BUF}{f:nat} .<f>.
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, upto: _ip, ks: _ip, ke: _ip, m: int m, f: int f): bool =
+  if f <= 0 then false
+  else if p >= upto then false
+  else let
+    val s = _sp(d, p, m, 65536)
+    val c = _at(d, s, m)
+    val k1 = (if c = HASH then ~1 else if c = NEWLINE then ~1 else if c = LBRACKET then ~1
+              else _key(d, s, m, 64)): _ip
+    val hit = (if k1 < 0 then false else if k1 - s != ke - ks then false
+               else _same(d, s, ks, ke - ks, m, 65536)): bool
+  in
+    if c = LBRACKET then false
+    else if hit then true
+    else _key_seen(d, _eol(d, p, m, 65536) + 1, upto, ks, ke, m, f - 1)
+  end
+
+(* Past the closing bracket of the [..] or {..} at p, across lines *)
+fun _bracket_end {la:agz}{m:nat | m <= TOML_MAX_BUF}{f:nat} .<f>.
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, depth: int, m: int m, f: int f): _ip =
+  if f <= 0 then p
+  else let val c = _at(d, p, m) in
+    if c < 0 then p
+    else if c = QUOTE then _bracket_end(d, _to(d, p + 1, QUOTE, m, 65536) + 1, depth, m, f - 1)
+    else if c = LBRACKET then _bracket_end(d, p + 1, depth + 1, m, f - 1)
+    else if c = 123 then _bracket_end(d, p + 1, depth + 1, m, f - 1)
+    else if c = RBRACKET then (if depth <= 1 then p + 1 else _bracket_end(d, p + 1, depth - 1, m, f - 1))
+    else if c = 125 then (if depth <= 1 then p + 1 else _bracket_end(d, p + 1, depth - 1, m, f - 1))
+    else _bracket_end(d, p + 1, depth, m, f - 1)
+  end
+
+(* Past the three closing quotes q of a multi-line string from p *)
+fun _ml_end {la:agz}{m:nat | m <= TOML_MAX_BUF}{f:nat} .<f>.
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, q: int, m: int m, f: int f): _ip =
+  if f <= 0 then p
+  else let val c = _at(d, p, m) in
+    if c < 0 then p
+    else if c != q then _ml_end(d, p + 1, q, m, f - 1)
+    else if _at(d, p + 1, m) != q then _ml_end(d, p + 1, q, m, f - 1)
+    else if _at(d, p + 2, m) != q then _ml_end(d, p + 1, q, m, f - 1)
+    else p + 3
+  end
+
+fn _escape_ok (e: int): bool =
+  if e = 98 then true else if e = 102 then true else if e = 110 then true
+  else if e = 114 then true else if e = 116 then true else if e = 117 then true
+  else if e = 85 then true else if e = 92 then true else e = QUOTE
+
+(* A basic string's body from p: @(past its closing quote, 0), or where
+   it goes wrong: @(p, 7) unterminated, @(past the escape, 8) a bad
+   escape (the toml crate points after its letter) *)
+fun _basic {la:agz}{m:nat | m <= TOML_MAX_BUF}{f:nat} .<f>.
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, m: int m, f: int f): @(_ip, int) =
+  if f <= 0 then @(p, 7)
+  else let val c = _at(d, p, m) in
+    if c < 0 then @(p, 7)
+    else if c = NEWLINE then @(p, 7)
+    else if c = QUOTE then @(p + 1, 0)
+    else if c = 92 then
+      (if _escape_ok(_at(d, p + 1, m)) then _basic(d, p + 2, m, f - 1) else @(p + 2, 8))
+    else _basic(d, p + 1, m, f - 1)
+  end
+
+(* Whether the bare value d[p, e) is true, false, inf or nan *)
+fn _word_ok {la:agz}{m:nat | m <= TOML_MAX_BUF}
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, e: _ip, m: int m): bool = let
+  var t_c = @[char][4]('t', 'r', 'u', 'e')
+  var f_c = @[char][5]('f', 'a', 'l', 's', 'e')
+  var i_c = @[char][3]('i', 'n', 'f')
+  var n_c = @[char][3]('n', 'a', 'n')
+in
+  if e - p = 4 then _lit_from(d, p, t_c, 0, 4, m)
+  else if e - p = 5 then _lit_from(d, p, f_c, 0, 5, m)
+  else if e - p = 3 then (if _lit_from(d, p, i_c, 0, 3, m) then true else _lit_from(d, p, n_c, 0, 3, m))
+  else false
+end
+
+(* A value from p: @(its end, 0), or @(where it goes wrong, code) *)
+fn _value {la:agz}{m:nat | m <= TOML_MAX_BUF}
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, m: int m): @(_ip, int) = let
+  val c = _at(d, p, m)
+in
+  if c = QUOTE then
+    (if _at(d, p + 1, m) != QUOTE then _basic(d, p + 1, m, 65536)
+     else if _at(d, p + 2, m) != QUOTE then @(p + 2, 0)
+     else @(_ml_end(d, p + 3, QUOTE, m, 65536), 0))
+  else if c = APOS then
+    (if _at(d, p + 1, m) != APOS then @(_to(d, p + 1, APOS, m, 65536) + 1, 0)
+     else if _at(d, p + 2, m) != APOS then @(p + 2, 0)
+     else @(_ml_end(d, p + 3, APOS, m, 65536), 0))
+  else if c = LBRACKET then @(_bracket_end(d, p, 0, m, 65536), 0)
+  else if c = 123 then @(_bracket_end(d, p, 0, m, 65536), 0)
+  else let
+    val e = _word_end(d, p, m, 65536)
+    val numeric = (if c >= 48 then c <= 57 else if c = 43 then true else c = 45): bool
+  in
+    if e <= p then @(p, 6)
+    else if numeric then @(e, 0)
+    else if _word_ok(d, p, e, m) then @(e, 0)
+    else @(p, 6)
+  end
+end
+
+(* Whether c ends what may follow a value or a header *)
+fn _line_end (c: int): bool =
+  if c < 0 then true else if c = NEWLINE then true else if c = HASH then true else c = CR
+
+(* The first syntax error in d[p, m), line by line, in the table whose
+   header names d[ts, te) (ts < 0 at the root) and whose keys start at
+   tstart: @(where, code, a key's span, the table's span); where is ~1
+   when there is none. Codes: 1-2 table header, 3 after a value, 4 no =,
+   5 invalid key, 6 invalid string, 7 unterminated basic string, 8 bad
+   escape, 9 duplicate header, 10 duplicate key. *)
+fun _check {la:agz}{m:nat | m <= TOML_MAX_BUF}{f:nat} .<f>.
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), p: _ip, m: int m,
+   tstart: _ip, ts: _ip, te: _ip, f: int f): @(_ip, int, _ip, _ip, _ip, _ip) =
+  if f <= 0 then @(~1, 0, 0, 0, ts, te)
+  else if p >= m then @(~1, 0, 0, 0, ts, te)
+  else let
+    val s = _sp(d, p, m, 65536)
+    val c = _at(d, s, m)
+  in
+    if c < 0 then @(~1, 0, 0, 0, ts, te)
+    else if c = NEWLINE then _check(d, s + 1, m, tstart, ts, te, f - 1)
+    else if c = CR then _check(d, _eol(d, s, m, 65536) + 1, m, tstart, ts, te, f - 1)
+    else if c = HASH then _check(d, _eol(d, s, m, 65536) + 1, m, tstart, ts, te, f - 1)
+    else if c = LBRACKET then
+      (if _at(d, s + 1, m) = LBRACKET then let
+         (* [[array of tables]]: a new table for its keys *)
+         val k0 = _sp(d, s + 2, m, 65536)
+         val k1 = _key(d, k0, m, 64)
+         val next = _eol(d, s, m, 65536) + 1
+       in _check(d, next, m, next, k0, (if k1 < 0 then k0 else k1): _ip, f - 1) end
+       else let
+         val k0 = _sp(d, s + 1, m, 65536)
+         val k1 = _key(d, k0, m, 64)
+         val a = (if k1 < 0 then k0 else _sp(d, k1, m, 65536)): _ip
+         val b = _sp(d, a + 1, m, 65536)
+         val next = _eol(d, s, m, 65536) + 1
+       in
+         if k1 < 0 then @(k0, 5, 0, 0, ts, te)
+         else if _at(d, a, m) != RBRACKET then @(a, 1, 0, 0, ts, te)
+         else if ~_line_end(_at(d, b, m)) then @(b, 2, 0, 0, ts, te)
+         else if _header_seen(d, 0, p, k0, k1, m, 65536) then @(s, 9, k0, k1, ts, te)
+         else _check(d, next, m, next, k0, k1, f - 1)
+       end)
+    else let
+      val k1 = _key(d, s, m, 64)
+      val a = (if k1 < 0 then s else _sp(d, k1, m, 65536)): _ip
+      val v0 = _sp(d, a + 1, m, 65536)
+      val @(ve, vc) = (if k1 < 0 then @(s, 0) else if _at(d, a, m) != EQUALS then @(s, 0)
+                       else _value(d, v0, m)): @(_ip, int)
+      val after = _sp(d, ve, m, 65536)
+    in
+      if k1 < 0 then @(s, 5, 0, 0, ts, te)
+      else if _at(d, a, m) != EQUALS then @(a, 4, 0, 0, ts, te)
+      else if _key_seen(d, tstart, p, s, k1, m, 65536) then @(s, 10, s, k1, ts, te)
+      else if vc > 0 then @(ve, vc, 0, 0, ts, te)
+      else if ~_line_end(_at(d, after, m)) then @(after, 3, 0, 0, ts, te)
+      else _check(d, _eol(d, ve, m, 65536) + 1, m, tstart, ts, te, f - 1)
+    end
+  end
+
+(* s's characters from i appended to msg at o; the next position *)
+fun _put_str {lo:agz}{mo:pos}{n:nat}{i:nat | i <= n}{o:nat | o <= mo} .<n - i>.
+  (msg: !$A.arr(byte, lo, mo), o: int o, max: int mo, s: string n, i: size_t i, n: size_t n)
+  : [r:nat | r <= mo] int r =
+  if i >= n then o
+  else if o >= max then o
+  else let
+    val () = $A.set<byte>(msg, o, $A.int2byte($AR.low_byte(char2int0(string_get_at(s, i)))))
+  in _put_str(msg, o + 1, max, s, i + 1, n) end
+
+fn _puts {lo:agz}{mo:pos}{n:nat}{o:nat | o <= mo}
+  (msg: !$A.arr(byte, lo, mo), o: int o, max: int mo, s: string n): [r:nat | r <= mo] int r =
+  _put_str(msg, o, max, s, i2sz(0), string1_length(s))
+
+(* d[a, b) appended to msg at o *)
+fun _put_text {la:agz}{m:nat | m <= TOML_MAX_BUF}{lo:agz}{mo:pos}{o:nat | o <= mo}{f:nat} .<f>.
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), a: _ip, b: _ip, m: int m,
+   msg: !$A.arr(byte, lo, mo), o: int o, max: int mo, f: int f): [r:nat | r <= mo] int r =
+  if f <= 0 then o
+  else if a >= b then o
+  else if o >= max then o
+  else let
+    val c = _at(d, a, m)
+    val () = $A.set<byte>(msg, o, $A.int2byte($AR.low_byte((if c < 0 then 63 else c): int)))
+  in _put_text(d, a + 1, b, m, msg, o + 1, max, f - 1) end
+
+(* The toml crate's message for code, into msg from 0 *)
+fn _message {la:agz}{m:nat | m <= TOML_MAX_BUF}{lo:agz}{mo:pos}
+  (d: !$A.arr(byte, la, TOML_MAX_BUF), m: int m, code: int, ks: _ip, ke: _ip, ts: _ip, te: _ip,
+   msg: !$A.arr(byte, lo, mo), max: int mo): [r:nat | r <= mo] int r =
+  if code = 1 then _puts(msg, 0, max, "invalid table header\nexpected `.`, `]`")
+  else if code = 2 then _puts(msg, 0, max, "invalid table header\nexpected newline, `#`")
+  else if code = 3 then _puts(msg, 0, max, "expected newline, `#`")
+  else if code = 4 then _puts(msg, 0, max, "expected `.`, `=`")
+  else if code = 5 then _puts(msg, 0, max, "invalid key")
+  else if code = 6 then _puts(msg, 0, max, "invalid string\nexpected `\"`, `'`")
+  else if code = 7 then _puts(msg, 0, max, "invalid basic string")
+  else if code = 8 then _puts(msg, 0, max, "invalid escape sequence\nexpected `b`, `f`, `n`, `r`, `t`, `u`, `U`, `\\`, `\"`")
+  else if code = 9 then let
+    val o = _puts(msg, 0, max, "invalid table header\nduplicate key `")
+    val o = _put_text(d, ks, ke, m, msg, o, max, 65536)
+  in _puts(msg, o, max, "` in document root") end
+  else let
+    val o = _puts(msg, 0, max, "duplicate key `")
+    val o = _put_text(d, ks, ke, m, msg, o, max, 65536)
+  in
+    if ts < 0 then _puts(msg, o, max, "` in document root")
+    else let
+      val o = _puts(msg, o, max, "` in table `")
+      val o = _put_text(d, ts, te, m, msg, o, max, 65536)
+    in _puts(msg, o, max, "`") end
+  end
+
+implement syntax_error {lo}{mo} (doc, msg, max) = let
+  val+ @toml_doc_mk(doc_buf, m, _, _) = doc
+  val @(off, code, ks, ke, ts, te) = _check(doc_buf, 0, m, 0, ~1, ~1, 65536)
+  val k = (if code = 0 then 0 else _message(doc_buf, m, code, ks, ke, ts, te, msg, max)): [k:nat | k <= mo] int k
+  prval () = fold@(doc)
+in @(off, k) end
 
 (* ============================================================
    free implementation
