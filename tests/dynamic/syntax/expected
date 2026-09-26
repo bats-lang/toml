@@ -1,0 +1,18 @@
+8 invalid table header|expected `.`, `]`
+19 invalid basic string
+17 invalid string|expected `"`, `'`
+21 duplicate key `name` in table `package`
+15 expected `.`, `=`
+9 invalid table header|expected newline, `#`
+21 expected newline, `#`
+21 invalid table header|duplicate key `package` in document root
+4 expected `.`, `=`
+10 invalid key
+17 invalid string|expected `"`, `'`
+1 invalid key
+21 invalid escape sequence|expected `b`, `f`, `n`, `r`, `t`, `u`, `U`, `\`, `"`
+6 invalid table header|expected `.`, `]`
+-1 
+6 duplicate key `x` in document root
+-1 
+-1 

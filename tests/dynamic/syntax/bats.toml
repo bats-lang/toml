@@ -1,0 +1,10 @@
+[package]
+name = "syntax"
+kind = "bin"
+
+[dependencies]
+"arith" = ""
+"array" = ""
+"result" = ""
+"str" = ""
+"toml" = ""
