@@ -1,0 +1,14 @@
+get 5 [hello]
+get 3 [lib]
+get 5 [false]
+get none
+get 0 []
+get 3 [a b]
+get 0 []
+get none
+get none
+get none
+keys 17 [name|kind|unsafe|]
+keys 12 ["arith"|str|]
+keys 20 [x|noeq line|version|]
+keys 6 [name|k]
