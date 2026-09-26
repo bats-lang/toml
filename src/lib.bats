@@ -227,9 +227,13 @@ implement parse {lb}{n} (input, len) = let
         else let
           val eq_pos = _find_char(bw, p, EQUALS, m)
         in
+          (* No '=' on this line (the scan stopped at a newline or the
+             end): skip the line. *)
           if eq_pos >= m then let
             val eol = _find_eol(bw, p, m)
           in parse_loop(bw, entries, eol + 1, k, sec_off, sec_len, m) end
+          else if _rd(bw, eq_pos) != EQUALS then
+            parse_loop(bw, entries, eq_pos + 1, k, sec_off, sec_len, m)
           else let
             val key_end = _trim_right(bw, p, eq_pos)
             val v0 = _skip_ws(bw, eq_pos + 1, m)
