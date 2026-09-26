@@ -47,9 +47,10 @@
    API
    ============================================================ *)
 
+(* Parses input[0, len) *)
 #pub fun parse
-  {lb:agz}{n:pos}
-  (input: !$A.borrow(byte, lb, n), len: int n): $R.result(toml_doc, int)
+  {lb:agz}{n:pos}{l:nat | l <= n}
+  (input: !$A.borrow(byte, lb, n), len: int l): $R.result(toml_doc, int)
 
 #pub fun get
   {lb:agz}{nb:pos}{lk:agz}{nk:pos}{lo:agz}{mo:pos}
@@ -74,7 +75,7 @@
    of the line; (~1, ~1) when the document has no such header. *)
 #pub fun section_at
   {lb:agz}{nb:pos}
-  (doc: !toml_doc, section: !$A.borrow(byte, lb, nb), slen: int nb): @(int, int)
+  (doc: !toml_doc, section: !$A.borrow(byte, lb, nb), slen: int nb): @([s:int] int s, [e:int] int e)
 
 (* The span [s, e) of key's value in section, quotes included, and
    whether the value is a string; s = ~1 when there is no such key. *)
@@ -82,7 +83,7 @@
   {lb:agz}{nb:pos}{lk:agz}{nk:pos}
   (doc: !toml_doc,
    section: !$A.borrow(byte, lb, nb), slen: int nb,
-   key: !$A.borrow(byte, lk, nk), klen: int nk): @(int, int, bool)
+   key: !$A.borrow(byte, lk, nk), klen: int nk): @([s:int] int s, [e:int] int e, bool)
 
 (* Whether a key comes before the first [header]. *)
 #pub fun has_root_keys (doc: !toml_doc): bool
@@ -214,12 +215,12 @@ fn _field_eq
    parse implementation
    ============================================================ *)
 
-implement parse {lb}{n} (input, len) = let
+implement parse {lb}{n}{l} (input, len) = let
   val doc_buf = $A.alloc<byte>(65536)
   val entries = $A.alloc<byte>(3072)
   val m = min(len, 65536)
 
-  fun copy_input {ld:agz}{m:nat | m <= n; m <= TOML_MAX_BUF}{i:nat | i <= m} .<m - i>.
+  fun copy_input {ld:agz}{m:nat | m <= l; m <= TOML_MAX_BUF}{i:nat | i <= m} .<m - i>.
     (dst: !$A.arr(byte, ld, TOML_MAX_BUF), src: !$A.borrow(byte, lb, n),
      i: int i, m: int m): void =
     if i >= m then ()
@@ -417,7 +418,7 @@ implement section_at {lb}{nb} (doc, section, slen) = let
   val+ @toml_doc_mk(doc_buf, _, entries, nentries) = doc
   fun loop {la:agz}{le:agz}{k:nat | k <= TOML_MAX_ENTRIES}{i:nat | i <= k} .<k - i>.
     (d: !$A.arr(byte, la, TOML_MAX_BUF), e: !$A.arr(byte, le, TOML_ENTRY_BYTES),
-     section: !$A.borrow(byte, lb, nb), k: int k, i: int i): @(int, int) =
+     section: !$A.borrow(byte, lb, nb), k: int k, i: int i): @([s:int] int s, [e:int] int e) =
     if i >= k then @(~1, ~1)
     else let val b = 12 * i in
       if _get16(e, b + 6) != 0 then loop(d, e, section, k, i + 1)
@@ -441,7 +442,7 @@ implement value_at {lb}{nb}{lk}{nk} (doc, section, slen, key, klen) = let
     in
       if quoted then @(voff - 1, voff + vlen + 1, true)
       else @(voff, voff + vlen, false)
-    end): @(int, int, bool)
+    end): @([s:int] int s, [e:int] int e, bool)
   prval () = fold@(doc)
 in r end
 
