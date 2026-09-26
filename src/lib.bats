@@ -1,5 +1,6 @@
 (* toml -- minimal TOML parser *)
-(* Handles [section], key = "value", key = true/false, # comments. *)
+(* Handles [section], key = "value" or 'value', key = true/false (any
+   bare value up to a # comment), # comments. *)
 (* Pure computation. No $UNSAFE, no assume. *)
 
 #include "share/atspre_staload.hats"
@@ -19,6 +20,7 @@
 #pub stadef TOML_ENTRY_BYTES = 3072
 
 #define QUOTE 34
+#define APOS 39
 #define HASH 35
 #define EQUALS 61
 #define LBRACKET 91
@@ -45,9 +47,10 @@
    API
    ============================================================ *)
 
+(* Parses input[0, len) *)
 #pub fun parse
-  {lb:agz}{n:pos}
-  (input: !$A.borrow(byte, lb, n), len: int n): $R.result(toml_doc, int)
+  {lb:agz}{n:pos}{l:nat | l <= n}
+  (input: !$A.borrow(byte, lb, n), len: int l): $R.result(toml_doc, int)
 
 #pub fun get
   {lb:agz}{nb:pos}{lk:agz}{nk:pos}{lo:agz}{mo:pos}
@@ -64,6 +67,29 @@
 
 #pub fun toml_free
   (doc: toml_doc): void
+
+(* Where things are in the parsed text, for error messages that point
+   at them (as the toml crate's spans do). *)
+
+(* The span [s, e) of section's [header] line, from its '[' to the end
+   of the line; (~1, ~1) when the document has no such header. *)
+#pub fun section_at
+  {lb:agz}{nb:pos}
+  (doc: !toml_doc, section: !$A.borrow(byte, lb, nb), slen: int nb): @([s:int] int s, [e:int] int e)
+
+(* The span [s, e) of key's value in section, quotes included, and
+   whether the value is a string; s = ~1 when there is no such key. *)
+#pub fun value_at
+  {lb:agz}{nb:pos}{lk:agz}{nk:pos}
+  (doc: !toml_doc,
+   section: !$A.borrow(byte, lb, nb), slen: int nb,
+   key: !$A.borrow(byte, lk, nk), klen: int nk): @([s:int] int s, [e:int] int e, bool)
+
+(* Whether a key comes before the first [header]. *)
+#pub fun has_root_keys (doc: !toml_doc): bool
+
+(* The byte at i of the parsed text; ~1 outside it. *)
+#pub fun byte_at {i:int} (doc: !toml_doc, i: int i): int
 
 (* ============================================================
    Scanning. Positions are indexed and never pass the input length m,
@@ -189,12 +215,12 @@ fn _field_eq
    parse implementation
    ============================================================ *)
 
-implement parse {lb}{n} (input, len) = let
+implement parse {lb}{n}{l} (input, len) = let
   val doc_buf = $A.alloc<byte>(65536)
   val entries = $A.alloc<byte>(3072)
   val m = min(len, 65536)
 
-  fun copy_input {ld:agz}{m:nat | m <= n; m <= TOML_MAX_BUF}{i:nat | i <= m} .<m - i>.
+  fun copy_input {ld:agz}{m:nat | m <= l; m <= TOML_MAX_BUF}{i:nat | i <= m} .<m - i>.
     (dst: !$A.arr(byte, ld, TOML_MAX_BUF), src: !$A.borrow(byte, lb, n),
      i: int i, m: int m): void =
     if i >= m then ()
@@ -232,7 +258,10 @@ implement parse {lb}{n} (input, len) = let
           val sec_start = p + 1
           val sec_end = _find_char(bw, sec_start, RBRACKET, m)
           val eol = _find_eol(bw, min(sec_end + 1, m), m)
-        in parse_loop(bw, entries, eol + 1, k, sec_start, sec_end - sec_start, m) end
+          (* The header itself, as an entry with an empty key (which
+             get and keys never match): its line is [p, eol) *)
+          val k2 = _store_entry(entries, k, sec_start, sec_end - sec_start, p, 0, eol, 0)
+        in parse_loop(bw, entries, eol + 1, k2, sec_start, sec_end - sec_start, m) end
         else let
           val eq_pos = _find_char(bw, p, EQUALS, m)
         in
@@ -256,8 +285,15 @@ implement parse {lb}{n} (input, len) = let
               val s1 = _find_char(bw, s0, QUOTE, m)
               val k2 = _store_entry(entries, k, sec_off, sec_len, p + q, key_end - p - 2 * q, s0, s1 - s0)
             in parse_loop(bw, entries, eol + 1, k2, sec_off, sec_len, m) end
+            else if _rd(bw, v0) = APOS then let
+              (* A literal string 'v' *)
+              val s0 = v0 + 1
+              val s1 = _find_char(bw, s0, APOS, m)
+              val k2 = _store_entry(entries, k, sec_off, sec_len, p + q, key_end - p - 2 * q, s0, s1 - s0)
+            in parse_loop(bw, entries, eol + 1, k2, sec_off, sec_len, m) end
             else let
-              val v1 = _trim_right(bw, v0, eol)
+              (* A bare value ends at a # comment *)
+              val v1 = _trim_right(bw, v0, _find_char(bw, v0, HASH, m))
               val k2 = _store_entry(entries, k, sec_off, sec_len, p + q, key_end - p - 2 * q, v0, v1 - v0)
             in parse_loop(bw, entries, eol + 1, k2, sec_off, sec_len, m) end
           end
@@ -360,7 +396,8 @@ implement keys {lb}{nb}{lo}{mo}
       val koff = _get16(e, b + 4)
       val klen = _get16(e, b + 6)
     in
-      if _field_eq(doc, _get16(e, b), _get16(e, b + 2), section, slen) then
+      if klen = 0 then collect(doc, e, section, out, k, i + 1, opos)
+      else if _field_eq(doc, _get16(e, b), _get16(e, b + 2), section, slen) then
         if koff + klen <= 65536 then
           collect(doc, e, section, out, k, i + 1, _copy_key(doc, koff, klen, out, opos, max))
         else collect(doc, e, section, out, k, i + 1, opos)
@@ -372,6 +409,62 @@ implement keys {lb}{nb}{lo}{mo}
 in
   if result > 0 then $R.some(g0ofg1(result)) else $R.none()
 end
+
+(* ============================================================
+   Spans
+   ============================================================ *)
+
+implement section_at {lb}{nb} (doc, section, slen) = let
+  val+ @toml_doc_mk(doc_buf, _, entries, nentries) = doc
+  fun loop {la:agz}{le:agz}{k:nat | k <= TOML_MAX_ENTRIES}{i:nat | i <= k} .<k - i>.
+    (d: !$A.arr(byte, la, TOML_MAX_BUF), e: !$A.arr(byte, le, TOML_ENTRY_BYTES),
+     section: !$A.borrow(byte, lb, nb), k: int k, i: int i): @([s:int] int s, [e:int] int e) =
+    if i >= k then @(~1, ~1)
+    else let val b = 12 * i in
+      if _get16(e, b + 6) != 0 then loop(d, e, section, k, i + 1)
+      else if _field_eq(d, _get16(e, b), _get16(e, b + 2), section, slen) then
+        @(_get16(e, b + 4), _get16(e, b + 8))
+      else loop(d, e, section, k, i + 1)
+    end
+  val r = loop(doc_buf, entries, section, nentries, 0)
+  prval () = fold@(doc)
+in r end
+
+implement value_at {lb}{nb}{lk}{nk} (doc, section, slen, key, klen) = let
+  val+ @toml_doc_mk(doc_buf, m, entries, nentries) = doc
+  val i = _search(doc_buf, entries, section, slen, key, klen, nentries)
+  val r = (if i < 0 then @(~1, ~1, false)
+    else let
+      val voff = _get16(entries, 12 * i + 8)
+      val vlen = _get16(entries, 12 * i + 10)
+      val before = (if voff > 0 then (if voff - 1 < m then byte2int0($A.get<byte>(doc_buf, voff - 1)) else 0) else 0): int
+      val quoted = (if before = QUOTE then true else before = APOS): bool
+    in
+      if quoted then @(voff - 1, voff + vlen + 1, true)
+      else @(voff, voff + vlen, false)
+    end): @([s:int] int s, [e:int] int e, bool)
+  prval () = fold@(doc)
+in r end
+
+implement has_root_keys (doc) = let
+  val+ @toml_doc_mk(_, _, entries, nentries) = doc
+  fun loop {le:agz}{k:nat | k <= TOML_MAX_ENTRIES}{i:nat | i <= k} .<k - i>.
+    (e: !$A.arr(byte, le, TOML_ENTRY_BYTES), k: int k, i: int i): bool =
+    if i >= k then false
+    else let val b = 12 * i in
+      if _get16(e, b + 2) = 0 then (if _get16(e, b + 6) > 0 then true else loop(e, k, i + 1))
+      else loop(e, k, i + 1)
+    end
+  val r = loop(entries, nentries, 0)
+  prval () = fold@(doc)
+in r end
+
+implement byte_at {i} (doc, i) = let
+  val+ @toml_doc_mk(doc_buf, m, _, _) = doc
+  val r = (if i < 0 then ~1 else if i >= m then ~1
+           else byte2int0($A.get<byte>(doc_buf, i))): int
+  prval () = fold@(doc)
+in r end
 
 (* ============================================================
    free implementation
