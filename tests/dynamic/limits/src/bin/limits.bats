@@ -8,13 +8,13 @@
 (* bats-lang/toml#46: parse_whole says when a document does not fit
    (limits); parse, kept for one version, still cuts (parse-old). *)
 
-fn _put {l:agz}{n:pos}{i:nat | i < n}
-  (buf: !$A.arr(byte, l, n), i: int i, c: int): void =
+fn _put {l:agz}{n:pos}{i:nat | i < n}{c:nat | c < 256}
+  (buf: !$A.arr(byte, l, n), i: int i, c: int c): void =
   $A.set<byte>(buf, i, $A.int2byte(c))
 
 (* Every byte of buf[i, n) is c. *)
-fun _fill {l:agz}{n:pos}{i:nat | i <= n} .<n - i>.
-  (buf: !$A.arr(byte, l, n), n: int n, i: int i, c: int): void =
+fun _fill {l:agz}{n:pos}{i:nat | i <= n}{c:nat | c < 256} .<n - i>.
+  (buf: !$A.arr(byte, l, n), n: int n, i: int i, c: int c): void =
   if i >= n then ()
   else let val () = _put(buf, i, c) in _fill(buf, n, i + 1, c) end
 
