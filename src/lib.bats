@@ -52,6 +52,19 @@
   {lb:agz}{n:pos}{l:nat | l <= n}
   (input: !$A.borrow(byte, lb, n), len: int l): $R.result(toml_doc, int)
 
+(* Parses input[0, len) and says when the document does not fit: more
+   than TOML_MAX_BUF bytes, or more than TOML_MAX_ENTRIES entries (a
+   [section] header is an entry). Nothing is cut silently, which `parse`
+   does (bats-lang/toml#46); `parse` stays beside it for one version. *)
+#pub datavtype toml_parse(len: int) =
+  | {len <= TOML_MAX_BUF} Whole(len) of toml_doc
+  | {len > TOML_MAX_BUF} Too_many_bytes(len) of ()
+  | Too_many_entries(len) of ()
+
+#pub fun parse_whole
+  {lb:agz}{n:pos}{l:nat | l <= n}
+  (input: !$A.borrow(byte, lb, n), len: int l): toml_parse(l)
+
 #pub fun get
   {lb:agz}{nb:pos}{lk:agz}{nk:pos}{lo:agz}{mo:pos}
   (doc: !toml_doc,
@@ -224,7 +237,21 @@ fn _field_eq
    parse implementation
    ============================================================ *)
 
-implement parse {lb}{n}{l} (input, len) = let
+(* Stores an entry, or says there is no room: the entry past the
+   TOML_MAX_ENTRIES-th is not kept (parse_whole, entries). *)
+fn _push
+  {le:agz}{k:nat | k <= TOML_MAX_ENTRIES}
+  (e: !$A.arr(byte, le, TOML_ENTRY_BYTES), k: int k,
+   sec_off: int, sec_len: int,
+   key_off: int, key_len: int,
+   val_off: int, val_len: int): @([r:nat | r <= TOML_MAX_ENTRIES] int r, bool) =
+  if k >= 256 then @(k, true)
+  else @(_store_entry(e, k, sec_off, sec_len, key_off, key_len, val_off, val_len), false)
+
+(* The parse of input[0, min(len, TOML_MAX_BUF)), and whether an entry
+   past the TOML_MAX_ENTRIES-th was left out. *)
+fn _parse_core {lb:agz}{n:pos}{l:nat | l <= n}
+  (input: !$A.borrow(byte, lb, n), len: int l): @(toml_doc, bool) = let
   val doc_buf = $A.alloc<byte>(65536)
   val entries = $A.alloc<byte>(3072)
   val m = min(len, 65536)
@@ -248,13 +275,12 @@ implement parse {lb}{n}{l} (input, len) = let
     (bw: !$A.borrow(byte, lbw, TOML_MAX_BUF),
      entries: !$A.arr(byte, le, TOML_ENTRY_BYTES),
      pos: int p, k: int k, sec_off: int, sec_len: int, m: int m)
-    : [r:nat | r <= TOML_MAX_ENTRIES] int r =
-    if pos >= m then k
-    else if k >= 256 then k
+    : @([r:nat | r <= TOML_MAX_ENTRIES] int r, bool) =
+    if pos >= m then @(k, false)
     else let
       val p = _skip_ws(bw, pos, m)
     in
-      if p >= m then k
+      if p >= m then @(k, false)
       else let
         val c = _rd(bw, p)
       in
@@ -269,8 +295,8 @@ implement parse {lb}{n}{l} (input, len) = let
           val eol = _find_eol(bw, min(sec_end + 1, m), m)
           (* The header itself, as an entry with an empty key (which
              get and keys never match): its line is [p, eol) *)
-          val k2 = _store_entry(entries, k, sec_start, sec_end - sec_start, p, 0, eol, 0)
-        in parse_loop(bw, entries, eol + 1, k2, sec_start, sec_end - sec_start, m) end
+          val @(k2, over) = _push(entries, k, sec_start, sec_end - sec_start, p, 0, eol, 0)
+        in (if over then @(k2, true) else parse_loop(bw, entries, eol + 1, k2, sec_start, sec_end - sec_start, m)) end
         else let
           val eq_pos = _find_char(bw, p, EQUALS, m)
         in
@@ -292,30 +318,43 @@ implement parse {lb}{n}{l} (input, len) = let
             else if _rd(bw, v0) = QUOTE then let
               val s0 = v0 + 1
               val s1 = _find_char(bw, s0, QUOTE, m)
-              val k2 = _store_entry(entries, k, sec_off, sec_len, p + q, key_end - p - 2 * q, s0, s1 - s0)
-            in parse_loop(bw, entries, eol + 1, k2, sec_off, sec_len, m) end
+              val @(k2, over) = _push(entries, k, sec_off, sec_len, p + q, key_end - p - 2 * q, s0, s1 - s0)
+            in (if over then @(k2, true) else parse_loop(bw, entries, eol + 1, k2, sec_off, sec_len, m)) end
             else if _rd(bw, v0) = APOS then let
               (* A literal string 'v' *)
               val s0 = v0 + 1
               val s1 = _find_char(bw, s0, APOS, m)
-              val k2 = _store_entry(entries, k, sec_off, sec_len, p + q, key_end - p - 2 * q, s0, s1 - s0)
-            in parse_loop(bw, entries, eol + 1, k2, sec_off, sec_len, m) end
+              val @(k2, over) = _push(entries, k, sec_off, sec_len, p + q, key_end - p - 2 * q, s0, s1 - s0)
+            in (if over then @(k2, true) else parse_loop(bw, entries, eol + 1, k2, sec_off, sec_len, m)) end
             else let
               (* A bare value ends at a # comment *)
               val v1 = _trim_right(bw, v0, _find_char(bw, v0, HASH, m))
-              val k2 = _store_entry(entries, k, sec_off, sec_len, p + q, key_end - p - 2 * q, v0, v1 - v0)
-            in parse_loop(bw, entries, eol + 1, k2, sec_off, sec_len, m) end
+              val @(k2, over) = _push(entries, k, sec_off, sec_len, p + q, key_end - p - 2 * q, v0, v1 - v0)
+            in (if over then @(k2, true) else parse_loop(bw, entries, eol + 1, k2, sec_off, sec_len, m)) end
           end
         end
       end
     end
 
-  val nentries = parse_loop(bw_buf, entries, 0, 0, 0, 0, m)
+  val @(nentries, over) = parse_loop(bw_buf, entries, 0, 0, 0, 0, m)
 
   val () = $A.drop<byte>(fz_buf, bw_buf)
   val doc_buf2 = $A.thaw<byte>(fz_buf)
 
-in $R.ok(toml_doc_mk(doc_buf2, m, entries, nentries)) end
+in @(toml_doc_mk(doc_buf2, m, entries, nentries), over) end
+
+implement parse {lb}{n}{l} (input, len) = let
+  val @(doc, _) = _parse_core(input, len)
+in $R.ok(doc) end
+
+implement parse_whole {lb}{n}{l} (input, len) =
+  if len > 65536 then Too_many_bytes()
+  else let
+    val @(doc, over) = _parse_core(input, len)
+  in
+    if over then let val () = toml_free(doc) in Too_many_entries() end
+    else Whole(doc)
+  end
 
 (* ============================================================
    get implementation
