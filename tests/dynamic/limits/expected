@@ -1,0 +1,10 @@
+bytes-65536 whole: Whole
+bytes-65536 old: ok
+bytes-65537 whole: Too_many_bytes
+bytes-65537 old: ok
+entries-256 whole: Whole
+entries-256 old: ok
+entries-257 whole: Too_many_entries
+entries-257 old: ok
+entries-256-comment whole: Whole
+entries-256-comment old: ok
