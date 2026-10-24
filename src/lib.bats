@@ -47,7 +47,11 @@
    API
    ============================================================ *)
 
-(* Parses input[0, len) *)
+(* Parses input[0, len), but cuts silently: it copies min(len, TOML_MAX_BUF)
+   bytes and keeps the first TOML_MAX_ENTRIES entries (a [section] header is
+   an entry), and returns ok with no sign that anything was left out. Use
+   `parse_whole`, which says so. *)
+(* deprecated (parse-limits): kept one version beside parse_whole; removed by bats-lang/toml#48 *)
 #pub fun parse
   {lb:agz}{n:pos}{l:nat | l <= n}
   (input: !$A.borrow(byte, lb, n), len: int l): $R.result(toml_doc, int)
